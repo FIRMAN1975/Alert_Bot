@@ -1,75 +1,73 @@
 import os
+import logging
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
-from dotenv import load_dotenv
-from sheets import kirim_ke_google_sheets
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from datetime import datetime
 
-load_dotenv()
+# Logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
-data = {}
+# Inisialisasi Google Sheets
+scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+credentials = ServiceAccountCredentials.from_json_keyfile_name('creds.json', scope)
+gc = gspread.authorize(credentials)
+sheet = gc.open_by_url(os.getenv("SHEET_URL")).sheet1
 
-def is_double(number):
-    return len(number) == 2 and number[0] == number[1]
+# Fungsi untuk mengecek apakah angka adalah double
+def is_double(nomor):
+    return len(str(nomor)) == 2 and str(nomor)[0] == str(nomor)[1]
 
-def update_pasaran(pasaran, angka):
-    if pasaran not in data:
-        data[pasaran] = {"history": [], "status": "Belum Diketahui"}
-    data[pasaran]["history"].append(angka)
-    data[pasaran]["history"] = data[pasaran]["history"][-10:]
-    if is_double(angka):
-        data[pasaran]["status"] = "Aman"
-    elif any(is_double(x) for x in data[pasaran]["history"]):
-        data[pasaran]["status"] = "Aman"
-    else:
-        data[pasaran]["status"] = "Waspada"
-
+# Fungsi menangani pesan masuk
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-    lines = text.splitlines()
-    response = []
+    chat_id = update.message.chat_id
 
-    for line in lines:
-        if ":" in line:
-            pasaran, angka = map(str.strip, line.split(":", 1))
-            if not angka.isdigit() or len(angka) != 2:
-                response.append(f"- {pasaran}: ⚠️ Format angka tidak valid (2 digit)")
-                continue
-            update_pasaran(pasaran, angka)
-            status = data[pasaran]["status"]
-            kirim_ke_google_sheets(pasaran, angka, status)
-            simbol = "✅" if status == "Aman" else "❗"
-            response.append(f"- {pasaran}: {angka} → {simbol} {status}")
-    if response:
-        await update.message.reply_text("\n".join(response))
+    if ":" in text:
+        try:
+            pasaran, angka = map(str.strip, text.split(":"))
+            angka = int(angka)
+
+            waktu = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            status = "DOBEL" if is_double(angka) else "BELUM DOBEL"
+
+            # Simpan ke sheet
+            sheet.append_row([waktu, pasaran, angka, status])
+
+            # Kirim balasan
+            if status == "DOBEL":
+                reply = f"✅ Pasaran *{pasaran}*: {angka} tercatat.\n🟢 Status: SUDAH DOBEL → Reset Aman"
+            else:
+                reply = f"✅ Pasaran *{pasaran}*: {angka} tercatat.\n🔴 Status: BELUM DOBEL (Waspada)"
+
+            await context.bot.send_message(chat_id=chat_id, text=reply, parse_mode='Markdown')
+        except:
+            await context.bot.send_message(chat_id=chat_id, text="Format salah. Gunakan: `Pasaran A: 55`", parse_mode='Markdown')
     else:
-        await update.message.reply_text("Format tidak dikenali. Contoh:\nPasaran A: 45")
+        await context.bot.send_message(chat_id=chat_id, text="Format salah. Gunakan: `Pasaran A: 55`", parse_mode='Markdown')
 
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not data:
-        await update.message.reply_text("Belum ada data.")
-        return
-    msg = "📊 Status Pasaran:\n"
-    for p, info in data.items():
-        simbol = "✅" if info["status"] == "Aman" else "❗"
-        msg += f"- {p}: {simbol} {info['status']}\n"
-    await update.message.reply_text(msg.strip())
 
-async def histori_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) != 1:
-        await update.message.reply_text("Gunakan: /histori <pasaran>")
-        return
-    pasaran = context.args[0]
-    if pasaran not in data:
-        await update.message.reply_text(f"Tidak ada data untuk {pasaran}.")
-        return
-    history = ", ".join(data[pasaran]["history"])
-    await update.message.reply_text(f"📜 Histori {pasaran}:\n{history}")
+async def main():
+    bot_token = os.getenv("BOT_TOKEN")
+    webhook_url = os.getenv("WEBHOOK_URL")
+
+    app = ApplicationBuilder().token(bot_token).build()
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
+
+    # Set Webhook
+    await app.bot.set_webhook(webhook_url)
+    logging.info("🤖 Bot aktif via Webhook!")
+
+    await app.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.environ.get("PORT", 8080)),
+        webhook_url=webhook_url
+    )
 
 if __name__ == "__main__":
-    token = os.getenv("BOT_TOKEN")
-    app = ApplicationBuilder().token(token).build()
-    app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(CommandHandler("histori", histori_command))
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
-    print("🤖 Bot aktif...")
-    app.run_polling()
+    import asyncio
+    asyncio.run(main())
